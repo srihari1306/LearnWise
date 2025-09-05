@@ -1,0 +1,14 @@
+Flask
+Flask-Login
+Flask-Session
+Flask-CORS
+Flask-SQLAlchemy
+SQLAlchemy
+werkzeug
+pdfplumber
+pypdf
+faiss-cpu
+requests
+python-dotenv
+google-generativeai
+PyMuPDF
