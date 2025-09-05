@@ -1,64 +1,51 @@
 # chat.py
 from flask import Blueprint, request, jsonify
 from flask_login import login_required, current_user
-from models import Workspace, UploadedFile
-from services.llm_service import answer_question_with_context
-import fitz  # PyMuPDF
+from models import Workspace, DocChunk
+from services.llm_service import embed_text, cosine_similarity, answer_question_with_context
 
 chat_bp = Blueprint("chat", __name__)
 
 @chat_bp.route("/<int:workspace_id>/chat", methods=["POST"])
 @login_required
 def chat(workspace_id):
-    # Check workspace ownership
     workspace = Workspace.query.get(workspace_id)
     if not workspace:
         return jsonify({"error": "workspace not found"}), 404
     if workspace.owner_id != current_user.id:
         return jsonify({"error": "forbidden"}), 403
-
-    data = request.get_json(silent=True) or {}
+    
+    data = request.get_json()
     question = data.get("question")
     if not question:
         return jsonify({"error": "no question"}), 400
 
-    # Get files in this workspace (no relationship on Workspace, so we query)
-    files = UploadedFile.query.filter_by(workspace_id=workspace_id).all()
-    if not files:
-        return jsonify({"error": "no documents uploaded in this workspace"}), 400
+    # Step 1: Embed the question
+    q_embedding = embed_text(question)
 
-    # Build chunks from PDFs (lightweight per-page chunks with provenance)
-    chunks = []
-    for f in files:
-        try:
-            with fitz.open(f.path) as doc:
-                for idx, page in enumerate(doc, start=1):
-                    text = page.get_text()
-                    if not text:
-                        continue
-                    chunks.append({
-                        "text": text,
-                        "source": f.filename,
-                        "page": idx
-                    })
-        except Exception as e:
-            # Skip unreadable files but continue with others
-            chunks.append({
-                "text": "",
-                "source": f.filename,
-                "page": None,
-                "error": f"Failed to read: {e}"
-            })
+    # Step 2: Retrieve chunks from DB
+    chunks = DocChunk.query.filter_by(workspace_id=workspace.id).all()
+    if not chunks:
+        return jsonify({"error": "no chunks available"}), 400
 
-    # If nothing readable, stop early
-    valid_chunks = [c for c in chunks if c.get("text")]
-    if not valid_chunks:
-        return jsonify({"error": "no readable text found in uploaded PDFs"}), 400
+    # Step 3: Rank by cosine similarity
+    scored = []
+    for c in chunks:
+        if not c.embedding:
+            continue
+        score = cosine_similarity(q_embedding, c.embedding)
+        scored.append((score, c))
+    scored.sort(reverse=True, key=lambda x: x[0])
 
-    # Ask the LLM with retrieval context; include provenance
-    answer, sources = answer_question_with_context(question, valid_chunks)
+    # Step 4: Select top-k chunks (e.g., 3)
+    top_chunks = scored[:3]
+    context = "\n\n".join([c.chunk_text for _, c in top_chunks])
+    sources = [{"id": c.id, "text": c.chunk_text[:100]} for _, c in top_chunks]
+
+    # Step 5: Ask Gemini with context
+    answer = answer_question_with_context(question, context)
 
     return jsonify({
         "answer": answer,
-        "sources": sources  # typically list of {filename, page}
+        "sources": sources
     })

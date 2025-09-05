@@ -1,11 +1,15 @@
 # backend/services/llm_service.py
 import os
 import json
+import numpy as np
 import google.generativeai as genai
 
 # Configure Gemini
 genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
-MODEL_NAME = "gemini-1.5-flash"  # use "gemini-1.5-pro" if you want better quality
+
+# Text generation model
+GEN_MODEL_NAME = "gemini-1.5-flash"   # or "gemini-1.5-pro" for better reasoning
+gen_model = genai.GenerativeModel(GEN_MODEL_NAME)
 
 def generate_study_package(raw_text: str, course_title: str, deadline: str = None):
     """
@@ -16,7 +20,6 @@ def generate_study_package(raw_text: str, course_title: str, deadline: str = Non
         "videos": list[dict]
     }
     """
-
     deadline_text = deadline if deadline else "soon"
 
     prompt = f"""
@@ -39,8 +42,7 @@ Return ONLY valid JSON in your final output, no explanations.
 """
 
     try:
-        model = genai.GenerativeModel(MODEL_NAME)
-        response = model.generate_content(prompt)
+        response = gen_model.generate_content(prompt)
 
         # Sometimes the response might contain markdown fences → clean it
         text = response.text.strip()
@@ -66,29 +68,37 @@ Return ONLY valid JSON in your final output, no explanations.
             "videos": []
         }
 
-def answer_question_with_context(question, chunks, top_k=3):
-    # naive retrieval: keyword match scoring
-    ranked = sorted(chunks, key=lambda c: question.lower() in c["text"].lower(), reverse=True)
-    selected = ranked[:top_k]
 
-    context = "\n\n".join([f"From {c['source']} (page {c['page']}):\n{c['text']}" for c in selected])
+# Embeddings (for semantic search)
+def embed_text(text: str) -> list[float]:
+    """Get embedding vector for a chunk of text using Gemini embeddings."""
+    resp = genai.embed_content(
+        model="models/embedding-001",  # correct embedding model ID
+        content=text
+    )
+    return resp["embedding"]
 
+
+def cosine_similarity(vec1, vec2):
+    v1 = np.array(vec1)
+    v2 = np.array(vec2)
+    return float(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)))
+
+
+# Chat Q&A
+def answer_question_with_context(question: str, context: str) -> str:
+    """Answer a question using the provided context."""
     prompt = f"""
-You are a study assistant. 
-Answer the student's question using the provided context from their PDFs.
-Include clear explanations. 
-If possible, cite which source/page you used.
-
-Question: {question}
+You are a helpful study assistant. 
+Use the following syllabus/content as context to answer the user's question.
 
 Context:
 {context}
-    """
 
-    model = genai.GenerativeModel("gemini-1.5-pro")
-    response = model.generate_content(prompt)
+Question: {question}
 
-    answer = response.text
-    sources = [{"filename": c["source"], "page": c["page"]} for c in selected]
-
-    return answer, sources
+Answer concisely. 
+If the answer is not in the context, reply: "I don’t know from the material."
+"""
+    response = gen_model.generate_content(prompt)
+    return response.text.strip()

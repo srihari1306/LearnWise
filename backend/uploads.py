@@ -6,13 +6,30 @@ from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
 from werkzeug.utils import secure_filename
 
-from models import db,Workspace, UploadedFile
-from services.llm_service import generate_study_package
+from models import db,Workspace, UploadedFile, DocChunk
+from services.llm_service import generate_study_package, embed_text
 
 uploads_bp = Blueprint("uploads_bp", __name__, url_prefix="/api/uploads")
 
 UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+
+
+def chunk_text(text, chunk_size=1000, overlap=200):
+    """
+    Split text into overlapping chunks of roughly `chunk_size` characters.
+    """
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunk = text[start:end]
+        chunks.append((chunk, start, end))
+        start = end - overlap  # overlap for context
+        if start < 0:
+            start = 0
+    return chunks
 
 @uploads_bp.route("/<int:workspace_id>", methods=["POST"])
 @login_required
@@ -65,13 +82,30 @@ def upload_pdf(workspace_id):
     db.session.add(rec)
     db.session.commit()
 
+    chunks = chunk_text(text)
+    for chunk_text_, start, end in chunks:
+        embedding = embed_text(chunk_text_)  # returns list[float]
+
+        chunk = DocChunk(
+            file_id=rec.id,
+            workspace_id=workspace_id,
+            chunk_text=chunk_text_,
+            start_pos=start,
+            end_pos=end,
+            token_count=len(chunk_text_.split()),  # rough word count
+            embedding=embedding,
+        )
+        db.session.add(chunk)
+
+    db.session.commit()
     # 7) response
     return jsonify({
         "message": "File uploaded & processed",
         "upload_id": rec.id,
         "summary": summary,
         "study_plan": study_plan,
-        "videos": videos
+        "videos": videos,
+        "chunks_created": len(chunks)
     }), 201
 
 
